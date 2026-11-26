@@ -1,28 +1,24 @@
-resolver 127.0.0.11 valid=10s ipv6=off;
+services:
+  app:
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    env_file: .env
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(@fsockopen(\"127.0.0.1\",9000)?0:1);'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
-server {
-    listen 80;
-    server_name _;
-
-    root /var/www/html/public;
-    index index.php;
-
-    client_max_body_size 20M;
-
-    location / {
-        try_files $uri $uri/ /index.php?$query_string;
-    }
-
-    location ~ \.php$ {
-        set $backend app:9000;
-        fastcgi_pass $backend;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME /var/www/html/public$fastcgi_script_name;
-        fastcgi_read_timeout 120s;
-    }
-
-    location ~ /\.(?!well-known) {
-        deny all;
-    }
-}
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
