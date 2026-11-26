@@ -1,0 +1,84 @@
+name: Deploy ke EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  APP_HOST: "54.206.6.69"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Siapkan SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o StrictHostKeyChecking=yes \
+              "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/aimeos-cloud-deploy"
+          PREV=$(git rev-parse HEAD)
+          echo "commit sebelumnya : $PREV"
+          git fetch --prune origin main
+          git merge --ff-only origin/main
+          echo "commit sekarang    : $(git rev-parse HEAD)"
+          docker compose up -d --build --remove-orphans
+          docker compose ps
+          echo "$PREV" > /tmp/aimeos-prev-commit
+          REMOTE
+
+      - name: Healthcheck
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o StrictHostKeyChecking=yes \
+              "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: 54.206.6.69" http://127.0.0.1/ || true)
+            echo "percobaan $i/20 -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "sehat"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "gagal: endpoint tidak pernah 200"
+          exit 1
+          REMOTE
+
+      - name: Rollback
+        if: failure()
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o StrictHostKeyChecking=yes \
+              "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          cd "$HOME/aimeos-cloud-deploy"
+          PREV=$(cat /tmp/aimeos-prev-commit 2>/dev/null || echo "")
+          if [ -z "$PREV" ]; then
+            echo "tidak ada commit sebelumnya, rollback dilewati"
+            exit 0
+          fi
+          echo "rollback ke $PREV"
+          git reset --hard "$PREV"
+          docker compose up -d --build --remove-orphans
+          REMOTE
